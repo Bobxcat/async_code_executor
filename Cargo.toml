@@ -1,0 +1,18 @@
+[package]
+name = "async_code_executor"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bumpalo = "3.16.0"
+mimalloc = "0.1.39"
+num-format = "0.4.4"
+oneshot = "0.1.6"
+thiserror = "1.0.59"
+# talc = { version = "4.4.1", default-features = false }
+# threadpool = "1.8.1"
+
+[profile.release]
+lto = true
