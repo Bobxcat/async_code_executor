@@ -8,9 +8,13 @@ use std::{
     sync::Arc,
 };
 
-use bumpalo::Bump;
-
-use crate::{executor::ProgramAlloc, gc::ProgramGC, global_debug, println_ctx, ptr_ops};
+use crate::{
+    bump_alloc::Bump,
+    executor::ProgramAlloc,
+    gc::ProgramGC,
+    global_debug, println_ctx,
+    ptr_ops::{self, DEFAULT_STACK_CAP, GIBIBYTE, TEBIBYTE},
+};
 
 use self::primitives::{NumTy, PrimTy};
 
@@ -73,11 +77,28 @@ impl CustomTy {
 pub struct CustomTyData {
     pub fields: Vec<PrimTy>,
     alloc_layout: Layout,
+    name: CustomTy,
 }
 
 /// Information about the custom types that currently exist
 pub struct TypeCtx {
     customs: HashMap<CustomTy, CustomTyData>,
+}
+
+impl TypeCtx {
+    pub fn empty() -> Self {
+        Self {
+            customs: HashMap::new(),
+        }
+    }
+    pub fn insert_custom(&mut self, ty: CustomTyData) {
+        if let Some(prev) = self.customs.insert(ty.name.clone(), ty) {
+            panic!(
+                "Called `insert_custom` on already existing type:\n{:#?}",
+                prev
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +127,12 @@ impl Type {
 impl From<PrimTy> for Type {
     fn from(value: PrimTy) -> Self {
         Self::Primitive(value)
+    }
+}
+
+impl From<CustomTy> for Type {
+    fn from(value: CustomTy) -> Self {
+        Self::Custom(value)
     }
 }
 
@@ -174,14 +201,17 @@ impl OwnedValue {
 /// This struct **owns** the data in a stack allocation. The underlying bytes (accessable by `as_bytes(..)`) are always valid, but may not be initialized.
 /// The first byte is always aligned according to the type of this `StackValHandle`
 ///
-/// This will be invalidated if the stack gets dropped or the underlying allocation is otherwise invalidated
+/// SAFETY:
+/// * This will be invalidated if the stack gets dropped or the underlying allocation is otherwise invalidated
+/// (this will not cause UB until the underlying data is accessed)
+/// * ZSTs will be represented by a dangling pointer
 #[derive(Debug)]
-pub struct StackValHandle {
+pub struct ValStackHandle {
     ty: Type,
     data_addr: NonNull<u8>,
 }
 
-impl StackValHandle {
+impl ValStackHandle {
     /// Interprets the underlying data as a reference of the given type.
     /// This is useful since it enforces lifetime and mutability rules
     ///
@@ -241,141 +271,54 @@ impl StackValHandle {
     }
 }
 
-#[repr(C)]
+/// A struct for allocating single stack values
 pub(crate) struct ValStack {
-    /// To avoid making mistakes with miri, use a pre-made bump allocator!
     alloc: Bump,
 }
 
 impl ValStack {
     /// Creates a new `ValStack` with 10MB of capacity
     pub fn new_default() -> Self {
-        Self::new(Some(10_000_000.try_into().unwrap()))
+        Self::new(Some(DEFAULT_STACK_CAP.try_into().unwrap()))
     }
     pub fn new(max_capacity: Option<NonZeroUsize>) -> Self {
-        let mut alloc = Bump::new();
-        alloc.set_allocation_limit(max_capacity.map(|x| x.into()));
+        let alloc = Bump::new(max_capacity);
         Self { alloc }
     }
     pub fn capacity(&self) -> usize {
-        // self.alloc
-        todo!()
+        self.alloc.capacity()
     }
     pub fn allocated_bytes(&self) -> usize {
-        // self.header.len
-        todo!()
+        self.alloc.allocated_bytes()
     }
-    /// Points to the first address after all allocated bytes
-    ///
-    /// Returns `*const ()` since the byte might not necessarily be valid (if this stack is at capacity)
-    pub fn allocation_end(&self) -> *const () {
-        // (self.blob.as_ptr() as usize + self.header.len) as *const ()
-        todo!()
-    }
-    #[must_use]
-    pub fn alloc_primitive<'data>(&'data mut self, prim: PrimTy) -> StackValHandle {
-        unsafe { self.alloc_layout(prim.clone().layout(), Type::Primitive(prim)) }
-    }
+    /// Allocating a ZST will result in a dangling allocation, which is expected
     #[inline(always)]
-    pub fn alloc_custom(&mut self, ty: Type, ctx: &TypeCtx) -> StackValHandle {
+    pub fn alloc_ty(&mut self, ty: impl Into<Type>, ctx: &TypeCtx) -> ValStackHandle {
+        let ty = ty.into();
+        // SAFETY: `ty.layout()` guarantees correctness
         unsafe { self.alloc_layout(ty.layout(ctx), ty) }
     }
-    /// SAFETY: `layout` must  be correct for the given `ty` parameter, there are no checks for what is passed as `ty`
+    /// Allocates a handle for the given type and layout
     ///
-    /// The returned `TypeVal` is a handle given
-    #[must_use]
-    pub unsafe fn alloc_layout<'data>(&'data mut self, layout: Layout, ty: Type) -> StackValHandle {
-        let ptr = self.alloc.alloc_layout(layout);
-        StackValHandle { ty, data_addr: ptr }
-    }
-
+    /// SAFETY:
+    /// * `layout` must represent the correct layout for the type
     #[inline(always)]
-    pub fn pop(&mut self, val: StackValHandle, ctx: &TypeCtx) {
-        match &val.ty {
-            Type::Custom(ty) => {
-                let layout = ctx.customs[ty].alloc_layout;
-                // SAFETY: The given layout is correct for this type
-                unsafe { self.pop_custom(val, layout) }
-            }
-            Type::Primitive(_) => self.pop_primitive(val),
+    pub unsafe fn alloc_layout(&mut self, layout: Layout, ty: Type) -> ValStackHandle {
+        let data = self.alloc.alloc_layout(layout).unwrap();
+        ValStackHandle {
+            ty,
+            data_addr: data.cast(),
         }
     }
+}
 
-    #[inline(always)]
-    pub fn pop_ret(&mut self, val: StackValHandle, ctx: &TypeCtx) -> OwnedValue {
-        match &val.ty {
-            Type::Custom(ty) => {
-                let layout = ctx.customs[ty].alloc_layout;
-                // SAFETY: The given layout is correct for this type
-                unsafe { self.pop_custom_ret(val, layout) }
-            }
-            Type::Primitive(_) => self.pop_primitive_ret(val),
-        }
-    }
+/// A struct for allocating stack frames
+pub(crate) struct FrameStack {
+    layout: Bump,
+}
 
-    #[inline(always)]
-    pub fn pop_primitive(&mut self, val: StackValHandle) {
-        let ty = val.ty.clone().unwrap_prim();
-
-        // SAFETY: This layout matches the given type
-        unsafe { self.pop_custom(val, ty.layout()) }
-    }
-
-    #[inline(always)]
-    pub fn pop_primitive_ret(&mut self, val: StackValHandle) -> OwnedValue {
-        let ty = val.ty.clone().unwrap_prim();
-
-        // SAFETY: This layout matches the given type
-        unsafe { self.pop_custom_ret(val, ty.layout()) }
-    }
-
-    #[inline(always)]
-    unsafe fn pop_custom(
-        &mut self,
-        StackValHandle { ty: _, data_addr }: StackValHandle,
-        layout: Layout,
-    ) {
-        // // Check to make sure this is the correct `StackValHandle`
-        // {
-        //     // Do not add `pre_padding`, since this goes before the `data_adddr`
-        //     let end_of_handle_allocation = data_addr as usize + layout.size();
-
-        //     if end_of_handle_allocation != self.allocation_end() as usize {
-        //         panic!(
-        //             "`pop_custom` called on `StackValHandle` which was not at the end of the stack:
-        //         Tried to deallocate {layout:?} & padding={pre_padding} from {}
-        //             (This allocation ends at {end_of_handle_allocation})
-        //         Current end of allocation was at {}
-        //             The end of allocation was ahead of attempted deallocation by {}",
-        //             data_addr as usize - pre_padding,
-        //             self.allocation_end() as usize,
-        //             self.allocation_end() as usize as isize - end_of_handle_allocation as isize
-        //         )
-        //     }
-        // }
-
-        // let total_handle_allocation_size = pre_padding + layout.size();
-
-        // self.header.len -= total_handle_allocation_size;
-        todo!()
-    }
-
-    #[inline(always)]
-    unsafe fn pop_custom_ret(&mut self, val: StackValHandle, layout: Layout) -> OwnedValue {
-        let stack_bytes = val.as_bytes_primitive();
-
-        let mut bytes = ptr_ops::alloc_bytes_aligned(layout.size(), layout.align());
-        assert_eq!(bytes.len(), stack_bytes.len());
-        for i in 0..bytes.len() {
-            bytes[i] = stack_bytes[i];
-        }
-        // SAFETY:
-        let ret = unsafe { OwnedValue::new_raw(val.ty.clone(), bytes) };
-        // SAFETY: The `OwnedValue` has been created and no longer cares about the original stack allocation,
-        // and the arguments to `pop_custom` match the arguments to this function
-        unsafe { self.pop_custom(val, layout) };
-        ret
-    }
+impl FrameStack {
+    //
 }
 
 #[test]
@@ -421,14 +364,15 @@ fn test_val_stack_allocation() {
 
 #[test]
 fn test_val_stack_alloc_dealloc() {
+    let ctx = TypeCtx::empty();
     let mut v = ValStack::new_default();
-    let mut bottom = v.alloc_primitive(PrimTy::Num(NumTy::U32));
+    let mut bottom = v.alloc_ty(PrimTy::Num(NumTy::U32), &ctx);
     *unsafe { bottom.as_mut::<u32>() } = 10;
     let mut handles = vec![];
 
     for i in 0..100 {
         for h in 0..=i {
-            let mut handle = v.alloc_primitive(PrimTy::Num(NumTy::F64));
+            let mut handle = v.alloc_ty(PrimTy::Num(NumTy::F64), &ctx);
             // SAFETY: This handle is a primitive `f64`
             let f = unsafe { handle.as_mut::<f64>() };
             *f = h as f64;
@@ -439,18 +383,18 @@ fn test_val_stack_alloc_dealloc() {
             let seek = (i - h) as f64;
             let h = handles.pop().unwrap();
             println_ctx!("{i}");
-            let top = v.pop_primitive_ret(h);
-            let copied: f64 = unsafe { *top.as_ref() };
-            assert_eq!(copied, seek);
+            // let top = v.pop_primitive_ret(h);
+            // let copied: f64 = unsafe { *top.as_ref() };
+            // assert_eq!(copied, seek);
         }
         assert!(handles.is_empty())
     }
 
     println_ctx!();
 
-    let bot = v.pop_primitive_ret(bottom);
-    let copied: u32 = unsafe { *bot.as_ref() };
-    assert_eq!(copied, 10);
+    // let bot = v.pop_primitive_ret(bottom);
+    // let copied: u32 = unsafe { *bot.as_ref() };
+    // assert_eq!(copied, 10);
 }
 
 pub mod primitives {
@@ -502,6 +446,56 @@ pub mod primitives {
                 PrimTy::GcPtr(_) => todo!(),
                 PrimTy::Num(ty) => ty.layout(),
             }
+        }
+    }
+}
+
+/// A layout of multiple typed fields accesable
+pub struct FieldsLayout {
+    layout: Layout,
+    value_positions: Vec<(usize, Type)>,
+}
+
+impl FieldsLayout {
+    pub fn new_auto(types: Vec<Type>, ctx: &TypeCtx) -> Self {
+        let mut curr_size = 0;
+        let mut max_align = 1;
+        let mut vals = vec![];
+
+        for ty in types {
+            let ty_layout = ty.layout(ctx);
+            // NOTE: `pos` is a super invalid ptr
+            let (pos, _offset) = ptr_ops::align_ptr_up(curr_size, ty_layout.align());
+            let pos = pos as usize;
+
+            curr_size = pos + ty_layout.size();
+            max_align = max_align.max(ty_layout.align());
+            vals.push((pos, ty));
+        }
+
+        let layout = Layout::from_size_align(curr_size, max_align).unwrap();
+
+        unsafe { Self::new_raw(layout, vals.into_iter()) }
+    }
+    /// SAFETY:
+    /// * The positions of every value must be non overlapping and fit completely within `layout.size()`
+    /// * `layout.align()` must be at least as large as the highest alignment in `value_positions`
+    pub unsafe fn new_raw(
+        layout: Layout,
+        value_positions: impl IntoIterator<Item = (usize, Type)>,
+    ) -> Self {
+        Self {
+            layout,
+            value_positions: value_positions.into_iter().collect(),
+        }
+    }
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+    /// Given that `base` points to the start of an allocation with this layout, gives a pointer to the field
+    pub fn ptr_to(&self, field: usize, base: NonNull<()>) -> NonNull<()> {
+        unsafe {
+            NonNull::new_unchecked(base.as_ptr().offset(self.value_positions[field].0 as isize))
         }
     }
 }

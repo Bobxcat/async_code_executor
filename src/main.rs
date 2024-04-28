@@ -2,7 +2,7 @@ use std::{alloc::GlobalAlloc, sync::Arc};
 
 use async_code_executor::{
     executor::{ExecutorBuilder, Literal},
-    function::{CodePoint, Function, FunctionId},
+    function::{CodePoint, FuncName, Function},
     types::primitives::NumTy,
 };
 
@@ -27,7 +27,7 @@ fn main() {
 
     ExecutorBuilder::new()
         .insert_function(Function {
-            id: FunctionId::new("main"),
+            id: FuncName::new("main"),
             params: vec![],
             program: [
                 CodePoint::Literal(Literal::F32(10.3)),

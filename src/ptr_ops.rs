@@ -1,10 +1,15 @@
 use std::{alloc::Layout, ptr::NonNull};
 
-pub const KILOBYTE: usize = 1024;
-pub const MEGABYTE: usize = KILOBYTE * KILOBYTE;
-pub const GIGABYTE: usize = MEGABYTE * MEGABYTE;
+pub const KIBIBYTE: usize = 1024;
+pub const MEBIBYTE: usize = KIBIBYTE * KIBIBYTE;
+pub const GIBIBYTE: usize = MEBIBYTE * KIBIBYTE;
+pub const TEBIBYTE: usize = GIBIBYTE * KIBIBYTE;
+
+pub const DEFAULT_STACK_CAP: usize = 8 * MEBIBYTE;
 
 /// Returns (`aligned_ptr`, `offset_applied`)
+///
+/// Does not follow strict provenance
 #[inline(always)]
 pub fn align_ptr_up(ptr: usize, align: usize) -> (*const (), usize) {
     if !align.is_power_of_two() {

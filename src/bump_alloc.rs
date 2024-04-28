@@ -8,7 +8,7 @@ use std::{alloc::Layout, mem::ManuallyDrop, num::NonZeroUsize, ptr::NonNull};
 
 use thiserror::Error;
 
-use crate::ptr_ops;
+use crate::ptr_ops::{self, MEBIBYTE, TEBIBYTE};
 
 ///
 pub struct Bump {
@@ -28,11 +28,17 @@ pub enum BumpErr {
 }
 
 impl Bump {
+    const MAX_CAPACITY: usize = 10 * TEBIBYTE;
+    const DEFAULT_CAPACITY: usize = 8 * MEBIBYTE;
     pub fn new_default() -> Self {
-        Self::new(ptr_ops::MEGABYTE * 2)
+        Self::new(Some((ptr_ops::MEBIBYTE * 2).try_into().unwrap()))
     }
 
-    pub fn new(max_capacity: usize) -> Self {
+    pub fn new(max_capacity: Option<NonZeroUsize>) -> Self {
+        let max_capacity = max_capacity
+            .map(|x| x.get())
+            .unwrap_or(Self::DEFAULT_CAPACITY)
+            .min(Self::MAX_CAPACITY);
         let allocation = unsafe { std::alloc::alloc(Layout::array::<u8>(max_capacity).unwrap()) };
         let base = NonNull::new(allocation).unwrap();
         Self {
@@ -65,7 +71,7 @@ impl Bump {
     }
     /// Returns the number of bytes allocated
     #[inline(always)]
-    pub fn allocate_bytes(&self) -> usize {
+    pub fn allocated_bytes(&self) -> usize {
         self.len
     }
     /// Returns whether or not the given address is within the memory span of this `Bump`

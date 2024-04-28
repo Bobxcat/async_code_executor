@@ -21,7 +21,7 @@ use std::{
 };
 
 use crate::{
-    function::{CodePoint, Function, FunctionId},
+    function::{Building, Built, CodePoint, FuncName, Function},
     gc::{DefaultProgramAlloc, GcPtr, ProgramGC},
 };
 
@@ -237,7 +237,7 @@ pub struct ExecutorBuilder<
 > {
     program_alloc: Alloc,
     num_threads: MaybeNumThreads,
-    functions: HashMap<FunctionId, Function>,
+    functions: HashMap<FuncName, Function<Building>>,
     _p: PhantomData<()>,
 }
 
@@ -269,7 +269,7 @@ impl<Alloc: ProgramAlloc, MaybeNumThreads: Maybe<usize>> ExecutorBuilder<Alloc, 
             _p: PhantomData,
         }
     }
-    pub fn insert_function(mut self, f: Function) -> Self {
+    pub fn insert_function(mut self, f: Function<Building>) -> Self {
         let id = f.id.clone();
         if let Some(_) = self.functions.insert(id.clone(), f) {
             panic!("Cannot insert function {:?}, already exists", id)
@@ -277,13 +277,7 @@ impl<Alloc: ProgramAlloc, MaybeNumThreads: Maybe<usize>> ExecutorBuilder<Alloc, 
         self
     }
     fn into_executor(self) -> Executor<Alloc> {
-        Executor {
-            data: ExecutorData {
-                gc: ProgramGC::new(self.program_alloc),
-                functions: self.functions,
-                idle_routines: RwLock::new(VecDeque::new()),
-            },
-        }
+        todo!()
     }
     pub fn run(self) {
         let num_threads = self.num_threads.get_or(10);
@@ -299,7 +293,7 @@ struct ExecutorRunCfg {
 #[derive(Debug)]
 struct ExecutorData<A: ProgramAlloc> {
     gc: ProgramGC<A>,
-    functions: HashMap<FunctionId, Function>,
+    functions: Vec<Function<Built>>,
     idle_routines: RwLock<VecDeque<Routine<A>>>,
 }
 
@@ -405,7 +399,7 @@ struct CodePointIdx(pub usize);
 #[derive(Debug)]
 struct Routine<A: ProgramAlloc> {
     data_stack: Stack,
-    call_stack: Vec<(*const Function, Option<CodePointIdx>)>,
+    call_stack: Vec<(*const Function<Built>, Option<CodePointIdx>)>,
     exec: *const Executor<A>,
 }
 
@@ -464,17 +458,19 @@ fn run_routine<A: ProgramAlloc>(
 
         match curr_code_point {
             CodePoint::SpawnRoutine(f) => {
-                let spawned_args = routine.exec().data.functions[f].params.clone();
-                let mut starting_stack = Stack::empty();
-                for _ty in &spawned_args {
-                    starting_stack.push(routine.data_stack.pop().unwrap());
-                }
-                starting_stack = starting_stack.reverse();
-                routine.exec().spawn_routine(f.clone(), starting_stack);
+                todo!()
+                // let spawned_args = routine.exec().data.functions[f].params.clone();
+                // let mut starting_stack = Stack::empty();
+                // for _ty in &spawned_args {
+                //     starting_stack.push(routine.data_stack.pop().unwrap());
+                // }
+                // starting_stack = starting_stack.reverse();
+                // routine.exec().spawn_routine(f.clone(), starting_stack);
             }
             CodePoint::CallFunction(f) => {
-                let func = &routine.exec().data.functions[f] as *const _;
-                routine.call_stack.push((func, None));
+                // let func = &routine.exec().data.functions[f] as *const _;
+                // routine.call_stack.push((func, None));
+                todo!()
             }
             // CodePoint::Add => {
             //     let b = routine.data_stack.pop().unwrap();
@@ -559,14 +555,15 @@ struct Executor<A: ProgramAlloc> {
 }
 
 impl<A: ProgramAlloc> Executor<A> {
-    fn spawn_routine(&self, f: FunctionId, starting_stack: Stack) {
-        let r = Routine {
-            data_stack: starting_stack,
-            call_stack: vec![(&self.data.functions[&f], Some(CodePointIdx(0)))],
-            exec: self,
-        };
-        let mut idle_routines = self.data.idle_routines.write().unwrap();
-        idle_routines.push_back(r)
+    fn spawn_routine(&self, f: FuncName, starting_stack: Stack) {
+        // let r = Routine {
+        //     data_stack: starting_stack,
+        //     call_stack: vec![(&self.data.functions[&f], Some(CodePointIdx(0)))],
+        //     exec: self,
+        // };
+        // let mut idle_routines = self.data.idle_routines.write().unwrap();
+        // idle_routines.push_back(r)
+        todo!()
     }
     pub fn run(&self, cfg: ExecutorRunCfg) {
         //!
@@ -586,7 +583,7 @@ impl<A: ProgramAlloc> Executor<A> {
             routine_returns.push(rx);
         }
 
-        let entrypoint = FunctionId::new("main");
+        let entrypoint = FuncName::new("main");
         self.spawn_routine(entrypoint, Stack::empty());
 
         loop {

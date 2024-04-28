@@ -1,14 +1,16 @@
+use std::fmt::Debug;
+
 use crate::{
     executor::{Literal, SizedTy, SizedVal},
     types::primitives::NumTy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FunctionId {
+pub struct FuncName {
     name: String,
 }
 
-impl FunctionId {
+impl FuncName {
     pub fn new(name: impl ToString) -> Self {
         Self {
             name: name.to_string(),
@@ -16,14 +18,21 @@ impl FunctionId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FuncIdx(pub usize);
+
+pub trait FunctionId: Debug + Clone {
+    //
+}
+
 #[derive(Debug, Clone)]
-pub enum CodePoint {
+pub enum CodePoint<B: BuildStatus> {
     /// For function `F(A, B, C, ..., Z)`
     ///
     /// Sets a starting stack for the new routine, see `CallFunction` for the stack format
     ///
     /// Spawn routine on function
-    SpawnRoutine(FunctionId),
+    SpawnRoutine(B::FunctionId),
     /// For function `F(A, B, C, ..., Z)`:
     ///
     /// This functions should expect arguments on the stack:
@@ -36,7 +45,7 @@ pub enum CodePoint {
     /// * Bottom
     ///
     /// Call `F(A, B, C, ..., Z)`
-    CallFunction(FunctionId),
+    CallFunction(B::FunctionId),
 
     // ===Binary Ops===
     /// Pop `b`, Pop `a`
@@ -106,16 +115,32 @@ pub enum CodePoint {
     DebugPrint,
 }
 
+pub trait BuildStatus {
+    type FunctionId: Debug + Clone;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Building;
+impl BuildStatus for Building {
+    type FunctionId = FuncName;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Built;
+impl BuildStatus for Built {
+    type FunctionId = FuncIdx;
+}
+
 #[derive(Debug)]
-pub struct Function {
-    pub id: FunctionId,
-    pub program: Vec<CodePoint>,
+pub struct Function<B: BuildStatus> {
+    pub id: FuncName,
+    pub program: Vec<CodePoint<B>>,
     pub params: Vec<SizedTy>,
     pub locals: Vec<SizedTy>,
 }
 
 pub(crate) struct FunctionFrame {
-    pub id: FunctionId,
+    pub id: FuncName,
     pub params: Vec<SizedVal>,
     pub locals: Vec<SizedVal>,
 }
