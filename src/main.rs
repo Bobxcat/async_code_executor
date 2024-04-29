@@ -20,8 +20,8 @@ unsafe impl GlobalAlloc for MiMalloc {
 }
 
 fn main() {
-    async_code_executor::start();
-    return;
+    // async_code_executor::start();
+    // return;
 
     let allocator = MiMalloc;
 

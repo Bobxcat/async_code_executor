@@ -1,4 +1,4 @@
-use crate::build_status::{CustomTyStore, FinishBuildingCtx};
+use crate::build_status::FinishBuildingCtx;
 use std::{alloc::Layout, marker::PhantomData, num::NonZeroUsize, ptr::NonNull};
 
 use crate::{
@@ -83,9 +83,11 @@ impl From<CustomTyName> for String {
 pub struct CustomTyIdx(usize);
 
 impl CustomTyIdx {
+    #[inline(always)]
     pub(crate) fn new(idx: usize) -> Self {
         Self(idx)
     }
+    #[inline(always)]
     pub(crate) fn get(self) -> usize {
         self.0
     }
@@ -94,35 +96,27 @@ impl CustomTyIdx {
 #[derive(Debug, Clone)]
 pub struct CustomType<B: BuildStatus> {
     pub(crate) id: B::CustomTyId,
-    pub(crate) fields: FieldsLayout<B>,
+    pub(crate) fields: B::CustomTyLayout,
 }
 
 /// Information about the custom types that currently exist
 #[derive(Debug)]
-pub struct TypeCtx<B: BuildStatus> {
-    customs: B::CustomTyStore,
+pub struct TypeCtx {
+    customs: Vec<CustomType<Built>>,
 }
 
-impl TypeCtx<Building> {
+impl TypeCtx {
     pub fn empty() -> Self {
         Self {
             customs: Default::default(),
         }
     }
-    pub fn insert_custom(&mut self, ty: CustomType<Building>) {
-        if let Some(prev) = self.customs.get(ty.id.clone()) {
-            panic!(
-                "Called `insert_custom` on already existing type:\n{:#?}",
-                prev
-            );
-        }
-        self.customs.insert(ty)
-    }
 }
 
-impl<B: BuildStatus> TypeCtx<B> {
-    pub fn get(&self, ty: B::CustomTyId) -> &CustomType<B> {
-        self.customs.get(ty).unwrap()
+impl TypeCtx {
+    #[inline(always)]
+    pub fn get(&self, ty: CustomTyIdx) -> &CustomType<Built> {
+        self.customs.get(ty.get()).unwrap()
     }
 }
 
@@ -140,10 +134,13 @@ impl<B: BuildStatus> Type<B> {
             Type::Primitive(prim) => prim,
         }
     }
+}
+
+impl Type<Built> {
     #[inline(always)]
-    pub fn layout(&self, ctx: &TypeCtx<B>) -> Layout {
+    pub fn layout(&self, ctx: &TypeCtx) -> Layout {
         match &self {
-            Type::Custom(t) => ctx.get(t.clone()).fields.layout(),
+            Type::Custom(t) => ctx.get(*t).fields.layout(),
             Type::Primitive(t) => t.layout(),
         }
     }
@@ -182,14 +179,14 @@ impl From<CustomTyIdx> for Type<Built> {
 /// * This will become invalidated if a deallocation is performed by the stack backing it
 /// *
 #[derive(Debug)]
-pub struct TypeVal<B: BuildStatus> {
-    ty: Type<B>,
+pub struct TypeVal {
+    ty: Type<Built>,
     data_addr: *mut u8,
 }
 
-impl<B: BuildStatus> TypeVal<B> {
+impl TypeVal {
     #[inline(always)]
-    pub fn as_bytes_ptr(&self, ctx: &TypeCtx<B>) -> *mut [u8] {
+    pub fn as_bytes_ptr(&self, ctx: &TypeCtx) -> *mut [u8] {
         match &self.ty {
             Type::Custom(_) => todo!(),
             Type::Primitive(_) => self.as_bytes_ptr_primitive(),
@@ -256,12 +253,12 @@ impl OwnedValue<Building> {
 /// (this will not cause UB until the underlying data is accessed)
 /// * ZSTs will be represented by a dangling pointer
 #[derive(Debug)]
-pub struct ValStackHandle<B: BuildStatus> {
-    ty: Type<B>,
+pub struct ValStackHandle {
+    ty: Type<Built>,
     data_addr: NonNull<u8>,
 }
 
-impl<B: BuildStatus> ValStackHandle<B> {
+impl ValStackHandle {
     /// Interprets the underlying data as a reference of the given type.
     /// This is useful since it enforces lifetime and mutability rules
     ///
@@ -283,7 +280,7 @@ impl<B: BuildStatus> ValStackHandle<B> {
         self.data_addr.as_ptr() as *mut T
     }
     #[inline(always)]
-    pub fn as_bytes(&self, ctx: &TypeCtx<B>) -> &[u8] {
+    pub fn as_bytes(&self, ctx: &TypeCtx) -> &[u8] {
         unsafe { &*self.as_bytes_ptr(ctx) }
     }
     #[inline(always)]
@@ -291,7 +288,7 @@ impl<B: BuildStatus> ValStackHandle<B> {
         unsafe { &*self.as_bytes_ptr_primitive() }
     }
     #[inline(always)]
-    pub fn as_mut_bytes(&mut self, ctx: &TypeCtx<B>) -> &mut [u8] {
+    pub fn as_mut_bytes(&mut self, ctx: &TypeCtx) -> &mut [u8] {
         unsafe { &mut *self.as_bytes_ptr(ctx) }
     }
     #[inline(always)]
@@ -299,7 +296,7 @@ impl<B: BuildStatus> ValStackHandle<B> {
         unsafe { &mut *self.as_bytes_ptr_primitive() }
     }
     #[inline(always)]
-    pub fn as_bytes_ptr(&self, ctx: &TypeCtx<B>) -> *mut [u8] {
+    pub fn as_bytes_ptr(&self, ctx: &TypeCtx) -> *mut [u8] {
         match &self.ty {
             Type::Custom(id) => {
                 let len = ctx.get(id.clone()).fields.layout().size();
@@ -322,22 +319,18 @@ impl<B: BuildStatus> ValStackHandle<B> {
 }
 
 /// A struct for allocating single stack values
-pub(crate) struct ValStack<B: BuildStatus> {
+pub(crate) struct ValStack {
     alloc: Bump,
-    _p: PhantomData<B>,
 }
 
-impl<B: BuildStatus> ValStack<B> {
+impl ValStack {
     /// Creates a new `ValStack` with 10MB of capacity
     pub fn new_default() -> Self {
         Self::new(Some(DEFAULT_STACK_CAP.try_into().unwrap()))
     }
     pub fn new(max_capacity: Option<NonZeroUsize>) -> Self {
         let alloc = Bump::new(max_capacity);
-        Self {
-            alloc,
-            _p: PhantomData,
-        }
+        Self { alloc }
     }
     pub fn capacity(&self) -> usize {
         self.alloc.capacity()
@@ -347,7 +340,7 @@ impl<B: BuildStatus> ValStack<B> {
     }
     /// Allocating a ZST will result in a dangling allocation, which is expected
     #[inline(always)]
-    pub fn alloc_ty(&mut self, ty: impl Into<Type<B>>, ctx: &TypeCtx<B>) -> ValStackHandle<B> {
+    pub fn alloc_ty(&mut self, ty: impl Into<Type<Built>>, ctx: &TypeCtx) -> ValStackHandle {
         let ty = ty.into();
         // SAFETY: `ty.layout()` guarantees correctness
         unsafe { self.alloc_layout(ty.layout(ctx), ty) }
@@ -357,7 +350,7 @@ impl<B: BuildStatus> ValStack<B> {
     /// SAFETY:
     /// * `layout` must represent the correct layout for the type
     #[inline(always)]
-    pub unsafe fn alloc_layout(&mut self, layout: Layout, ty: Type<B>) -> ValStackHandle<B> {
+    pub unsafe fn alloc_layout(&mut self, layout: Layout, ty: Type<Built>) -> ValStackHandle {
         let data = self.alloc.alloc_layout(layout).unwrap();
         ValStackHandle {
             ty,
@@ -379,7 +372,7 @@ impl FrameStack {
 fn test_val_stack_new() {
     use std::hint::black_box;
     fn foo(cap: usize) {
-        let a = ValStack::<Building>::new(Some(cap.try_into().unwrap()));
+        let a = ValStack::new(Some(cap.try_into().unwrap()));
         assert_eq!(a.capacity(), cap);
         black_box(a);
     }
@@ -392,7 +385,7 @@ fn test_val_stack_new() {
 #[test]
 fn test_val_stack_allocation() {
     let v = &mut ValStack::new_default();
-    fn foo<T>(v: &mut ValStack<Building>) {
+    fn foo<T>(v: &mut ValStack) {
         let start_bytes = v.allocated_bytes();
 
         let layout = Layout::new::<T>();
@@ -519,13 +512,13 @@ pub mod primitives {
 /// A layout of multiple typed fields.
 /// The position of each field relative to the start of the layout is accessable by the index of that field
 #[derive(Debug, Clone)]
-pub struct FieldsLayout<B: BuildStatus> {
+pub struct FieldsLayout {
     layout: Layout,
-    value_positions: Vec<(usize, Type<B>)>,
+    value_positions: Vec<(usize, Type<Built>)>,
 }
 
-impl<B: BuildStatus> FieldsLayout<B> {
-    pub fn new_auto(types: Vec<Type<B>>, ctx: &TypeCtx<B>) -> Self {
+impl FieldsLayout {
+    pub fn new_auto(types: Vec<Type<Built>>, ctx: &TypeCtx) -> Self {
         let mut curr_size = 0;
         let mut max_align = 1;
         let mut vals = vec![];
@@ -550,7 +543,7 @@ impl<B: BuildStatus> FieldsLayout<B> {
     /// * `layout.align()` must be at least as large as the highest alignment in `value_positions`
     pub unsafe fn new_raw(
         layout: Layout,
-        value_positions: impl IntoIterator<Item = (usize, Type<B>)>,
+        value_positions: impl IntoIterator<Item = (usize, Type<Built>)>,
     ) -> Self {
         Self {
             layout,

@@ -24,7 +24,7 @@ use crate::{
     build_status::{BuildStatus, Building, Built, FinishBuildingCtx},
     function::{CodePoint, FuncName, Function},
     gc::{DefaultProgramAlloc, GcPtr, ProgramGC},
-    types::{Type, TypeCtx},
+    types::{CustomTyName, CustomType, Type, TypeCtx},
 };
 
 /// An allocator that can be used to allocate values used by the program
@@ -142,6 +142,7 @@ pub struct ExecutorBuilder<
     program_alloc: Alloc,
     num_threads: MaybeNumThreads,
     functions: HashMap<FuncName, Function<Building>>,
+    customs: HashMap<CustomTyName, CustomType<Building>>,
     _p: PhantomData<()>,
 }
 
@@ -151,6 +152,7 @@ impl ExecutorBuilder {
             program_alloc: DefaultProgramAlloc::new(Some(1_000_000.try_into().unwrap())),
             num_threads: Empty::new(),
             functions: HashMap::new(),
+            customs: HashMap::new(),
             _p: PhantomData,
         }
     }
@@ -162,6 +164,7 @@ impl<Alloc: ProgramAlloc, MaybeNumThreads: Maybe<usize>> ExecutorBuilder<Alloc, 
             program_alloc: self.program_alloc,
             num_threads: num_threads.into(),
             functions: self.functions,
+            customs: self.customs,
             _p: PhantomData,
         }
     }
@@ -170,12 +173,20 @@ impl<Alloc: ProgramAlloc, MaybeNumThreads: Maybe<usize>> ExecutorBuilder<Alloc, 
             program_alloc: a,
             num_threads: self.num_threads,
             functions: self.functions,
+            customs: self.customs,
             _p: PhantomData,
         }
     }
     pub fn insert_function(mut self, f: Function<Building>) -> Self {
         let id = f.id.clone();
         if let Some(_) = self.functions.insert(id.clone(), f) {
+            panic!("Cannot insert function {:?}, already exists", id)
+        }
+        self
+    }
+    pub fn insert_custom(mut self, ty: CustomType<Building>) -> Self {
+        let id = ty.id.clone();
+        if let Some(_) = self.customs.insert(id.clone(), ty) {
             panic!("Cannot insert function {:?}, already exists", id)
         }
         self
@@ -213,7 +224,7 @@ struct ExecutorRunCfg {
 struct ExecutorStatics<A: ProgramAlloc> {
     gc: ProgramGC<A>,
     functions: Vec<Function<Built>>,
-    customs: TypeCtx<Built>,
+    customs: TypeCtx,
 }
 
 #[derive(Debug)]

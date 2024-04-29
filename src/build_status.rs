@@ -2,46 +2,14 @@ use std::{collections::HashMap, fmt::Debug};
 
 use crate::{
     function::{FuncIdx, FuncName, Function},
-    types::{CustomTyIdx, CustomTyName, CustomType, TypeCtx},
+    types::{CustomTyIdx, CustomTyName, CustomType, FieldsLayout, Type, TypeCtx},
 };
-
-pub trait CustomTyStore<B: BuildStatus>: Default {
-    fn get(&self, id: B::CustomTyId) -> Option<&CustomType<B>>;
-}
-
-#[derive(Debug, Default)]
-pub struct CustomTyMap {
-    m: HashMap<CustomTyName, CustomType<Building>>,
-}
-
-impl CustomTyMap {
-    pub fn insert(&mut self, ty: CustomType<Building>) {
-        self.m.insert(ty.id.clone(), ty);
-    }
-}
-
-impl CustomTyStore<Building> for CustomTyMap {
-    fn get(&self, id: <Building as BuildStatus>::CustomTyId) -> Option<&CustomType<Building>> {
-        self.m.get(&id)
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct CustomTyVec {
-    v: Vec<CustomType<Built>>,
-}
-
-impl CustomTyStore<Built> for CustomTyVec {
-    fn get(&self, id: <Built as BuildStatus>::CustomTyId) -> Option<&CustomType<Built>> {
-        self.v.get(id.get())
-    }
-}
 
 pub trait BuildStatus: Sized + Copy + Debug + 'static {
     type FunctionId: Debug + Clone;
     type CustomTyId: Debug + Clone;
 
-    type CustomTyStore: CustomTyStore<Self>;
+    type CustomTyLayout;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -50,7 +18,7 @@ impl BuildStatus for Building {
     type FunctionId = FuncName;
     type CustomTyId = CustomTyName;
 
-    type CustomTyStore = CustomTyMap;
+    type CustomTyLayout = Vec<Type<Building>>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,7 +27,7 @@ impl BuildStatus for Built {
     type FunctionId = FuncIdx;
     type CustomTyId = CustomTyIdx;
 
-    type CustomTyStore = CustomTyVec;
+    type CustomTyLayout = FieldsLayout;
 }
 
 pub struct FinishBuildingCtx {
