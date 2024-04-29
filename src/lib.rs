@@ -9,6 +9,7 @@ mod ptr_ops;
 pub mod types;
 #[macro_use]
 mod macros;
+mod build_status;
 
 pub fn start() {
     //

@@ -21,107 +21,11 @@ use std::{
 };
 
 use crate::{
-    function::{Building, Built, CodePoint, FuncName, Function},
+    build_status::{BuildStatus, Building, Built, FinishBuildingCtx},
+    function::{CodePoint, FuncName, Function},
     gc::{DefaultProgramAlloc, GcPtr, ProgramGC},
+    types::{Type, TypeCtx},
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CustomTypeId {
-    name: String,
-}
-
-impl CustomTypeId {
-    pub fn new(name: String) -> Self {
-        Self { name }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SendChannel {
-    tx: Sender<SizedVal>,
-}
-
-#[derive(Debug)]
-pub struct RecvChannel {
-    tx: Receiver<SizedVal>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Literal {
-    F32(f32),
-    F64(f64),
-}
-
-impl From<Literal> for SizedVal {
-    fn from(value: Literal) -> Self {
-        match value {
-            Literal::F32(f) => SizedVal::F32(f),
-            Literal::F64(f) => SizedVal::F64(f),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum SizedTy {
-    F32,
-    F64,
-    SendChannel,
-    RecvChannel,
-    Custom(CustomTypeId),
-    Ptr(Box<SizedTy>),
-}
-
-#[derive(Debug)]
-pub enum SizedVal {
-    F32(f32),
-    F64(f64),
-    SendChannel(SendChannel),
-    RecvChannel(RecvChannel),
-    Ptr(GcPtr, SizedTy),
-}
-
-impl SizedVal {
-    pub fn type_of(&self) -> SizedTy {
-        match self {
-            SizedVal::F32(_) => SizedTy::F32,
-            SizedVal::F64(_) => SizedTy::F64,
-            SizedVal::SendChannel(_) => SizedTy::SendChannel,
-            SizedVal::RecvChannel(_) => SizedTy::RecvChannel,
-            SizedVal::Ptr(_, ty) => SizedTy::Ptr(Box::new(ty.clone())),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Stack {
-    values: Vec<SizedVal>,
-}
-
-impl Stack {
-    pub fn empty() -> Self {
-        Self { values: vec![] }
-    }
-    pub fn pop(&mut self) -> Option<SizedVal> {
-        self.values.pop()
-    }
-    pub fn push(&mut self, s: SizedVal) {
-        self.values.push(s)
-    }
-    /// Reads the `i`th element from the top of the stack
-    pub fn get(&self, i: usize) -> Option<&SizedVal> {
-        self.values.get(self.values.len() - 1 - i)
-    }
-    /// Reads the `i`th element from the top of the stack
-    pub fn get_mut(&mut self, i: usize) -> Option<&mut SizedVal> {
-        let last = self.values.len() - 1;
-        self.values.get_mut(last - i)
-    }
-    pub fn reverse(mut self) -> Self {
-        let v = self.values.into_iter().rev().collect();
-        self.values = v;
-        self
-    }
-}
 
 /// An allocator that can be used to allocate values used by the program
 ///
@@ -277,6 +181,20 @@ impl<Alloc: ProgramAlloc, MaybeNumThreads: Maybe<usize>> ExecutorBuilder<Alloc, 
         self
     }
     fn into_executor(self) -> Executor<Alloc> {
+        let finish_ctx =
+            FinishBuildingCtx::from_names([], self.functions.iter().map(|(n, _)| n.clone()));
+
+        let statics = ExecutorStatics {
+            gc: ProgramGC::new(self.program_alloc),
+            functions: todo!(),
+            customs: todo!(),
+        };
+
+        Executor {
+            statics: Arc::new(statics),
+            idle_routines: todo!(),
+        };
+
         todo!()
     }
     pub fn run(self) {
@@ -290,124 +208,42 @@ struct ExecutorRunCfg {
     num_threads: usize,
 }
 
+/// The static data in an executor which is immutable
 #[derive(Debug)]
-struct ExecutorData<A: ProgramAlloc> {
+struct ExecutorStatics<A: ProgramAlloc> {
     gc: ProgramGC<A>,
     functions: Vec<Function<Built>>,
-    idle_routines: RwLock<VecDeque<Routine<A>>>,
+    customs: TypeCtx<Built>,
 }
 
 #[derive(Debug)]
-enum TypeMismatchErr {
-    TraitNotImplemented { ty: SizedTy, needs_trait: String },
+enum TypeMismatchErr<B: BuildStatus> {
+    TraitNotImplemented { ty: Type<B>, needs_trait: String },
 }
 
-impl Display for TypeMismatchErr {
+impl<B: BuildStatus> Display for TypeMismatchErr<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Debug::fmt(&self, f)
     }
 }
 
-impl std::error::Error for TypeMismatchErr {}
-
-impl<A: ProgramAlloc> ExecutorData<A> {
-    pub fn type_is_clone(&self, ty: SizedTy) -> bool {
-        match ty {
-            SizedTy::F32 | SizedTy::F64 | SizedTy::SendChannel | SizedTy::Ptr(_) => true,
-            SizedTy::RecvChannel => false,
-            SizedTy::Custom(_) => todo!(),
-        }
-    }
-    pub fn try_clone(&self, val: &SizedVal) -> Option<SizedVal> {
-        if !self.type_is_clone(val.type_of()) {
-            return None;
-        }
-        Some(match val {
-            SizedVal::F32(f) => SizedVal::F32(*f),
-            SizedVal::F64(f) => SizedVal::F64(*f),
-            SizedVal::SendChannel(s) => SizedVal::SendChannel(s.clone()),
-            SizedVal::Ptr(_, _) => todo!(),
-            SizedVal::RecvChannel(_) => return None,
-        })
-    }
-    pub fn try_add(&self, lhs: &SizedVal, rhs: &SizedVal) -> Result<SizedVal, TypeMismatchErr> {
-        Ok(match (lhs, rhs) {
-            (SizedVal::F32(a), SizedVal::F32(b)) => SizedVal::F32(*a + *b),
-            (SizedVal::F64(a), SizedVal::F64(b)) => SizedVal::F64(*a + *b),
-            _ => {
-                return Err(TypeMismatchErr::TraitNotImplemented {
-                    ty: lhs.type_of(),
-                    needs_trait: format!("Add<Rhs={:?}>", rhs.type_of()),
-                })
-            }
-        })
-    }
-    pub fn try_sub(&self, lhs: &SizedVal, rhs: &SizedVal) -> Result<SizedVal, TypeMismatchErr> {
-        Ok(match (lhs, rhs) {
-            (SizedVal::F32(a), SizedVal::F32(b)) => SizedVal::F32(*a - *b),
-            (SizedVal::F64(a), SizedVal::F64(b)) => SizedVal::F64(*a - *b),
-            _ => {
-                return Err(TypeMismatchErr::TraitNotImplemented {
-                    ty: lhs.type_of(),
-                    needs_trait: format!("Sub<Rhs={:?}>", rhs.type_of()),
-                })
-            }
-        })
-    }
-    pub fn try_mul(&self, lhs: &SizedVal, rhs: &SizedVal) -> Result<SizedVal, TypeMismatchErr> {
-        Ok(match (lhs, rhs) {
-            (SizedVal::F32(a), SizedVal::F32(b)) => SizedVal::F32(*a * *b),
-            (SizedVal::F64(a), SizedVal::F64(b)) => SizedVal::F64(*a * *b),
-            _ => {
-                return Err(TypeMismatchErr::TraitNotImplemented {
-                    ty: lhs.type_of(),
-                    needs_trait: format!("Mul<Rhs={:?}>", rhs.type_of()),
-                })
-            }
-        })
-    }
-    pub fn try_div(&self, lhs: &SizedVal, rhs: &SizedVal) -> Result<SizedVal, TypeMismatchErr> {
-        Ok(match (lhs, rhs) {
-            (SizedVal::F32(a), SizedVal::F32(b)) => SizedVal::F32(*a / *b),
-            (SizedVal::F64(a), SizedVal::F64(b)) => SizedVal::F64(*a / *b),
-            _ => {
-                return Err(TypeMismatchErr::TraitNotImplemented {
-                    ty: lhs.type_of(),
-                    needs_trait: format!("Div<Rhs={:?}>", rhs.type_of()),
-                })
-            }
-        })
-    }
-    pub fn try_dbg_format(&self, lhs: &SizedVal) -> Result<String, TypeMismatchErr> {
-        Ok(match lhs {
-            SizedVal::F32(a) => format!("{a}"),
-            SizedVal::F64(a) => format!("{a}"),
-            SizedVal::Ptr(a, ty) => format!("{ty:?}@{}", a.clone().as_hex_addr()),
-            _ => {
-                return Err(TypeMismatchErr::TraitNotImplemented {
-                    ty: lhs.type_of(),
-                    needs_trait: format!("DebugFormat"),
-                })
-            }
-        })
-    }
-}
+impl<B: BuildStatus> std::error::Error for TypeMismatchErr<B> {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CodePointIdx(pub usize);
 
 #[derive(Debug)]
 struct Routine<A: ProgramAlloc> {
-    data_stack: Stack,
+    // data_stack: Stack,
     call_stack: Vec<(*const Function<Built>, Option<CodePointIdx>)>,
-    exec: *const Executor<A>,
+    exec: Arc<ExecutorStatics<A>>,
 }
 
 unsafe impl<A: ProgramAlloc> Send for Routine<A> {}
 
 impl<A: ProgramAlloc> Routine<A> {
-    fn exec(&self) -> &Executor<A> {
-        unsafe { &*self.exec }
+    fn exec(&self) -> &ExecutorStatics<A> {
+        &*self.exec
     }
 }
 
@@ -457,64 +293,6 @@ fn run_routine<A: ProgramAlloc>(
         };
 
         match curr_code_point {
-            CodePoint::SpawnRoutine(f) => {
-                todo!()
-                // let spawned_args = routine.exec().data.functions[f].params.clone();
-                // let mut starting_stack = Stack::empty();
-                // for _ty in &spawned_args {
-                //     starting_stack.push(routine.data_stack.pop().unwrap());
-                // }
-                // starting_stack = starting_stack.reverse();
-                // routine.exec().spawn_routine(f.clone(), starting_stack);
-            }
-            CodePoint::CallFunction(f) => {
-                // let func = &routine.exec().data.functions[f] as *const _;
-                // routine.call_stack.push((func, None));
-                todo!()
-            }
-            // CodePoint::Add => {
-            //     let b = routine.data_stack.pop().unwrap();
-            //     let a = routine.data_stack.pop().unwrap();
-
-            //     let res = routine.exec().data.try_add(&a, &b).unwrap();
-            //     routine.data_stack.push(res);
-            // }
-            // CodePoint::Sub => {
-            //     let b = routine.data_stack.pop().unwrap();
-            //     let a = routine.data_stack.pop().unwrap();
-
-            //     let res = routine.exec().data.try_sub(&a, &b).unwrap();
-            //     routine.data_stack.push(res);
-            // }
-            // CodePoint::Mul => {
-            //     let b = routine.data_stack.pop().unwrap();
-            //     let a = routine.data_stack.pop().unwrap();
-
-            //     let res = routine.exec().data.try_mul(&a, &b).unwrap();
-            //     routine.data_stack.push(res);
-            // }
-            // CodePoint::Div => {
-            //     let b = routine.data_stack.pop().unwrap();
-            //     let a = routine.data_stack.pop().unwrap();
-
-            //     let res = routine.exec().data.try_div(&a, &b).unwrap();
-            //     routine.data_stack.push(res);
-            // }
-            CodePoint::Recv => todo!(),
-            CodePoint::Send => todo!(),
-            CodePoint::Clone => todo!(),
-            // CodePoint::Literal(lhs) => routine.data_stack.push(lhs.clone().into()),
-            CodePoint::Allocate => todo!(),
-            CodePoint::AssertType(_) => todo!(),
-            CodePoint::DebugPrint => {
-                let a = routine.data_stack.get(0).unwrap();
-                println!(
-                    "From `{:?}`:\n{}",
-                    curr_func.id,
-                    routine.exec().data.try_dbg_format(a).unwrap()
-                );
-                std::io::stdout().flush().unwrap();
-            }
             _ => todo!(),
         }
 
@@ -551,20 +329,20 @@ fn routine_runner<A: ProgramAlloc>(tx: Sender<RoutineRunnerResult<A>>) {
 /// The executor, which is shared between threads and should **never** be mutably referenced (once `run` is called)
 #[derive(Debug)]
 struct Executor<A: ProgramAlloc> {
-    data: ExecutorData<A>,
+    statics: Arc<ExecutorStatics<A>>,
+    idle_routines: RwLock<VecDeque<Routine<A>>>,
 }
 
 impl<A: ProgramAlloc> Executor<A> {
-    fn spawn_routine(&self, f: FuncName, starting_stack: Stack) {
-        // let r = Routine {
-        //     data_stack: starting_stack,
-        //     call_stack: vec![(&self.data.functions[&f], Some(CodePointIdx(0)))],
-        //     exec: self,
-        // };
-        // let mut idle_routines = self.data.idle_routines.write().unwrap();
-        // idle_routines.push_back(r)
-        todo!()
-    }
+    // fn spawn_routine(&self, f: FuncName, starting_stack: Stack) {
+    //     let r = Routine {
+    //         data_stack: starting_stack,
+    //         call_stack: vec![(&self.data.functions[&f], Some(CodePointIdx(0)))],
+    //         exec: self,
+    //     };
+    //     let mut idle_routines = self.data.idle_routines.write().unwrap();
+    //     idle_routines.push_back(r)
+    // }
     pub fn run(&self, cfg: ExecutorRunCfg) {
         //!
         //! This function dispatches routines to a specified number of worker threads.
@@ -573,6 +351,8 @@ impl<A: ProgramAlloc> Executor<A> {
         //! Each worker thread will run their routine for a while, until either yielding or working for a specified time.
         //! When a worker thread gives their routine back to this function, their previous routine is placed at the back of the routine queue.
         //!
+
+        todo!();
 
         let mut routine_returns: Vec<Receiver<RoutineRunnerResult<A>>> = vec![];
 
@@ -584,7 +364,7 @@ impl<A: ProgramAlloc> Executor<A> {
         }
 
         let entrypoint = FuncName::new("main");
-        self.spawn_routine(entrypoint, Stack::empty());
+        // self.spawn_routine(entrypoint, Stack::empty());
 
         loop {
             let Some(res) = routine_returns.iter().find_map(|r| r.try_recv().ok()) else {
@@ -592,7 +372,7 @@ impl<A: ProgramAlloc> Executor<A> {
             };
 
             let next = loop {
-                let mut idle_routines = self.data.idle_routines.write().unwrap();
+                let mut idle_routines = self.idle_routines.write().unwrap();
                 if let Some(r) = idle_routines.pop_front() {
                     break r;
                 }
@@ -607,7 +387,7 @@ impl<A: ProgramAlloc> Executor<A> {
                 } => {
                     next_routine.send(next).unwrap();
 
-                    let mut idle_routines = self.data.idle_routines.write().unwrap();
+                    let mut idle_routines = self.idle_routines.write().unwrap();
                     idle_routines.push_back(yielded);
                 }
             }

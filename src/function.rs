@@ -1,8 +1,8 @@
-use std::fmt::Debug;
+use std::{collections::HashMap, fmt::Debug, marker::PhantomData};
 
 use crate::{
-    executor::{Literal, SizedTy, SizedVal},
-    types::primitives::NumTy,
+    build_status::{BuildStatus, Building, Built, FinishBuildingCtx},
+    types::{primitives::NumTy, CustomTyIdx, CustomTyName, CustomType, OwnedValue, Type, TypeCtx},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -18,11 +18,16 @@ impl FuncName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct FuncIdx(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FuncIdx(usize);
 
-pub trait FunctionId: Debug + Clone {
-    //
+impl FuncIdx {
+    pub(crate) fn new(n: usize) -> Self {
+        Self(n)
+    }
+    pub(crate) fn get(self) -> usize {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +100,7 @@ pub enum CodePoint<B: BuildStatus> {
     /// Push `a`, Push `a`
     Clone,
     /// Push a literal
-    Literal(Literal),
+    Literal(OwnedValue<B>),
 
     // ===References===
     /// Pop `a`
@@ -107,7 +112,7 @@ pub enum CodePoint<B: BuildStatus> {
     /// Read `a` {`top`}
     ///
     /// Panicks if `a` is not the given type
-    AssertType(SizedTy),
+    AssertType(Type<B>),
 
     /// Read `a` {`top`}
     ///
@@ -115,32 +120,55 @@ pub enum CodePoint<B: BuildStatus> {
     DebugPrint,
 }
 
-pub trait BuildStatus {
-    type FunctionId: Debug + Clone;
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Building;
-impl BuildStatus for Building {
-    type FunctionId = FuncName;
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Built;
-impl BuildStatus for Built {
-    type FunctionId = FuncIdx;
-}
-
 #[derive(Debug)]
 pub struct Function<B: BuildStatus> {
-    pub id: FuncName,
+    pub id: B::FunctionId,
     pub program: Vec<CodePoint<B>>,
-    pub params: Vec<SizedTy>,
-    pub locals: Vec<SizedTy>,
+    pub params: Vec<Type<B>>,
+    pub locals: Vec<Type<B>>,
 }
 
-pub(crate) struct FunctionFrame {
-    pub id: FuncName,
-    pub params: Vec<SizedVal>,
-    pub locals: Vec<SizedVal>,
+impl Function<Building> {
+    pub(crate) fn finish(&self, ctx: &FinishBuildingCtx) -> Function<Built> {
+        use CodePoint::*;
+        let program = self
+            .program
+            .iter()
+            .cloned()
+            .map(|code_point| {
+                let new: CodePoint<Built> = match code_point {
+                    SpawnRoutine(id) => SpawnRoutine(ctx.func(&id)),
+                    CallFunction(id) => SpawnRoutine(ctx.func(&id)),
+                    Add(x) => Add(x),
+                    Sub(x) => Sub(x),
+                    Mul(x) => Mul(x),
+                    Div(x) => Div(x),
+                    Recv => Recv,
+                    Send => Send,
+                    Clone => Clone,
+                    Literal(l) => Literal(l.finish(ctx)),
+                    Allocate => Allocate,
+                    AssertType(t) => AssertType(t.finish(ctx)),
+                    DebugPrint => DebugPrint,
+                };
+                new
+            })
+            .collect::<Vec<CodePoint<Built>>>();
+        Function {
+            id: ctx.func(&self.id),
+            program,
+            params: self
+                .params
+                .clone()
+                .into_iter()
+                .map(|t| t.finish(ctx))
+                .collect(),
+            locals: self
+                .params
+                .clone()
+                .into_iter()
+                .map(|t| t.finish(ctx))
+                .collect(),
+        }
+    }
 }

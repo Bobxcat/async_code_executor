@@ -1,7 +1,7 @@
 use std::{alloc::GlobalAlloc, sync::Arc};
 
 use async_code_executor::{
-    executor::{ExecutorBuilder, Literal},
+    executor::ExecutorBuilder,
     function::{CodePoint, FuncName, Function},
     types::primitives::NumTy,
 };
@@ -30,9 +30,9 @@ fn main() {
             id: FuncName::new("main"),
             params: vec![],
             program: [
-                CodePoint::Literal(Literal::F32(10.3)),
+                // CodePoint::Literal(Literal::F32(10.3)),
                 CodePoint::DebugPrint,
-                CodePoint::Literal(Literal::F32(-3.)),
+                // CodePoint::Literal(Literal::F32(-3.)),
                 CodePoint::DebugPrint,
                 CodePoint::Add(NumTy::F32),
                 CodePoint::DebugPrint,
