@@ -1,5 +1,7 @@
 use crate::build_status::FinishBuildingCtx;
-use std::{alloc::Layout, marker::PhantomData, num::NonZeroUsize, ptr::NonNull};
+use std::{
+    alloc::Layout, collections::HashMap, marker::PhantomData, num::NonZeroUsize, ptr::NonNull,
+};
 
 use crate::{
     build_status::{BuildStatus, Building, Built},
@@ -111,11 +113,90 @@ impl TypeCtx {
             customs: Default::default(),
         }
     }
+    pub fn build(
+        ctx: &FinishBuildingCtx,
+        type_data: HashMap<CustomTyName, CustomType<Building>>,
+    ) -> Self {
+        #[derive(Debug)]
+        struct CustomUnfinished {
+            _name: CustomTyName,
+            _idx: CustomTyIdx,
+            fields: Vec<Type<Built>>,
+        }
+        let mut customs_unfinished: HashMap<CustomTyIdx, CustomUnfinished> = HashMap::new();
+        let mut customs_finished: HashMap<CustomTyIdx, CustomType<Built>> = HashMap::new();
+        for (id, ty) in type_data {
+            let idx = ctx.custom(&id);
+            let field_types = ty
+                .fields
+                .into_iter()
+                .map(|t| t.finish(ctx))
+                .collect::<Vec<_>>();
+
+            customs_unfinished.insert(
+                idx,
+                CustomUnfinished {
+                    _name: id,
+                    _idx: idx,
+                    fields: field_types,
+                },
+            );
+        }
+
+        loop {
+            // Whether or not a type has been finished this cycle
+            let mut has_finished_type = false;
+
+            customs_unfinished.retain(|&idx, unfinished| {
+                let retain: bool;
+                match FieldsLayout::try_new_auto(unfinished.fields.clone(), |idx| {
+                    customs_finished.get(&idx).map(|t| t.fields.layout())
+                }) {
+                    Some(fields) => {
+                        has_finished_type = true;
+                        retain = false;
+                        customs_finished.insert(idx, CustomType { id: idx, fields });
+                    }
+                    None => retain = true,
+                }
+
+                retain
+            });
+
+            if customs_unfinished.len() == 0 {
+                break;
+            }
+
+            if !has_finished_type {
+                panic!("Panic when building type context: Could not resolve layout of the following types:
+                =====
+                {:#?}
+                =====
+                Make sure that there are no circular custom type layouts! If you need circular types, use indirection
+                ", customs_unfinished);
+            }
+        }
+
+        assert_eq!(customs_unfinished.len(), 0);
+        assert_eq!(customs_finished.len(), ctx.customs().count());
+
+        let mut customs = customs_finished
+            .into_iter()
+            .map(|(_idx, ty)| ty)
+            .collect::<Vec<_>>();
+        customs.sort_unstable_by_key(|t| t.id);
+
+        for i in 0..customs.len() {
+            assert_eq!(i, customs[i].id.get())
+        }
+
+        TypeCtx { customs }
+    }
 }
 
 impl TypeCtx {
     #[inline(always)]
-    pub fn get(&self, ty: CustomTyIdx) -> &CustomType<Built> {
+    pub(crate) fn get(&self, ty: CustomTyIdx) -> &CustomType<Built> {
         self.customs.get(ty.get()).unwrap()
     }
 }
@@ -137,6 +218,20 @@ impl<B: BuildStatus> Type<B> {
 }
 
 impl Type<Built> {
+    /// Tries to get the layout of this type from the given mapping
+    ///
+    /// Keep in mind:
+    /// * A pointer to a custom type does *not* need to go through `maybe_layout`
+    #[inline(always)]
+    fn try_get_layout(
+        &self,
+        maybe_layout: &impl Fn(CustomTyIdx) -> Option<Layout>,
+    ) -> Option<Layout> {
+        match self {
+            Type::Custom(id) => maybe_layout(*id),
+            Type::Primitive(t) => Some(t.layout()),
+        }
+    }
     #[inline(always)]
     pub fn layout(&self, ctx: &TypeCtx) -> Layout {
         match &self {
@@ -518,13 +613,17 @@ pub struct FieldsLayout {
 }
 
 impl FieldsLayout {
-    pub fn new_auto(types: Vec<Type<Built>>, ctx: &TypeCtx) -> Self {
+    /// Returns `None` iff any calls to `maybe_layout` for a type in `fields` yielded `None`
+    pub(crate) fn try_new_auto(
+        fields: Vec<Type<Built>>,
+        maybe_layout: impl Fn(CustomTyIdx) -> Option<Layout>,
+    ) -> Option<Self> {
         let mut curr_size = 0;
         let mut max_align = 1;
         let mut vals = vec![];
 
-        for ty in types {
-            let ty_layout = ty.layout(ctx);
+        for ty in fields {
+            let ty_layout = ty.try_get_layout(&maybe_layout)?;
             // NOTE: `pos` is a super invalid ptr
             let (pos, _offset) = ptr_ops::align_ptr_up(curr_size, ty_layout.align());
             let pos = pos as usize;
@@ -536,12 +635,15 @@ impl FieldsLayout {
 
         let layout = Layout::from_size_align(curr_size, max_align).unwrap();
 
-        unsafe { Self::new_raw(layout, vals.into_iter()) }
+        Some(unsafe { Self::new_raw(layout, vals.into_iter()) })
+    }
+    pub(crate) fn new_auto(fields: Vec<Type<Built>>, ctx: &TypeCtx) -> Self {
+        Self::try_new_auto(fields, |idx| Some(ctx.get(idx).fields.layout())).unwrap()
     }
     /// SAFETY:
     /// * The positions of every value must be non overlapping and fit completely within `layout.size()`
     /// * `layout.align()` must be at least as large as the highest alignment in `value_positions`
-    pub unsafe fn new_raw(
+    pub(crate) unsafe fn new_raw(
         layout: Layout,
         value_positions: impl IntoIterator<Item = (usize, Type<Built>)>,
     ) -> Self {

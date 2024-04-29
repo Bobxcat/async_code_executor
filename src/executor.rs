@@ -203,10 +203,8 @@ impl<Alloc: ProgramAlloc, MaybeNumThreads: Maybe<usize>> ExecutorBuilder<Alloc, 
 
         Executor {
             statics: Arc::new(statics),
-            idle_routines: todo!(),
+            idle_routines: RwLock::default(),
         };
-
-        todo!()
     }
     pub fn run(self) {
         let num_threads = self.num_threads.get_or(10);

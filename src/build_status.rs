@@ -60,4 +60,7 @@ impl FinishBuildingCtx {
     pub fn func(&self, id: &FuncName) -> FuncIdx {
         self.funcs[&id].clone()
     }
+    pub fn customs(&self) -> impl Iterator<Item = (&CustomTyName, &CustomTyIdx)> {
+        self.types.iter()
+    }
 }
