@@ -1,9 +1,10 @@
+use async_code_executor::types::{primitives::PrimTy, OwnedValue};
 use std::{alloc::GlobalAlloc, sync::Arc};
 
 use async_code_executor::{
     executor::ExecutorBuilder,
     function::{CodePoint, FuncName, Function},
-    types::primitives::NumTy,
+    types::{primitives::NumTy, CustomType, Type},
 };
 
 #[derive(Debug, Clone)]
@@ -30,9 +31,9 @@ fn main() {
             id: FuncName::new("main"),
             params: vec![],
             program: [
-                // CodePoint::Literal(Literal::F32(10.3)),
+                CodePoint::Literal(OwnedValue::new(10f64)),
                 CodePoint::DebugPrint,
-                // CodePoint::Literal(Literal::F32(-3.)),
+                CodePoint::Literal(OwnedValue::new(10f32)),
                 CodePoint::DebugPrint,
                 CodePoint::Add(NumTy::F32),
                 CodePoint::DebugPrint,
@@ -41,6 +42,13 @@ fn main() {
             .collect(),
             locals: vec![],
         })
+        .insert_custom(CustomType::new(
+            "FooBar",
+            vec![
+                Type::Primitive(PrimTy::Num(NumTy::F32)),
+                Type::Primitive(PrimTy::Num(NumTy::F64)),
+            ],
+        ))
         .set_allocator(allocator)
         .run();
 

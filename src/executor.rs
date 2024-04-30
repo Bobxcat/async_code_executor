@@ -24,7 +24,7 @@ use crate::{
     build_status::{BuildStatus, Building, Built, FinishBuildingCtx},
     function::{CodePoint, FuncName, Function},
     gc::{DefaultProgramAlloc, GcPtr, ProgramGC},
-    types::{CustomTyName, CustomType, Type, TypeCtx},
+    types::{primitives::NumTy, CustomTyName, CustomType, Type, TypeCtx, ValStack, ValStackEntry},
 };
 
 /// An allocator that can be used to allocate values used by the program
@@ -192,19 +192,30 @@ impl<Alloc: ProgramAlloc, MaybeNumThreads: Maybe<usize>> ExecutorBuilder<Alloc, 
         self
     }
     fn into_executor(self) -> Executor<Alloc> {
-        let finish_ctx =
-            FinishBuildingCtx::from_names([], self.functions.iter().map(|(n, _)| n.clone()));
+        let finish_ctx = FinishBuildingCtx::from_names(
+            self.customs.iter().map(|(n, _)| n.clone()),
+            self.functions.iter().map(|(n, _)| n.clone()),
+        );
+
+        let type_ctx = TypeCtx::build(&finish_ctx, self.customs);
+
+        let mut functions = self
+            .functions
+            .iter()
+            .map(|(_name, func)| func.finish(&finish_ctx))
+            .collect::<Vec<_>>();
+        functions.sort_unstable_by_key(|f| f.id);
 
         let statics = ExecutorStatics {
             gc: ProgramGC::new(self.program_alloc),
-            functions: todo!(),
-            customs: todo!(),
+            functions,
+            customs: type_ctx,
         };
 
         Executor {
             statics: Arc::new(statics),
             idle_routines: RwLock::default(),
-        };
+        }
     }
     pub fn run(self) {
         let num_threads = self.num_threads.get_or(10);
@@ -243,18 +254,12 @@ struct CodePointIdx(pub usize);
 
 #[derive(Debug)]
 struct Routine<A: ProgramAlloc> {
-    // data_stack: Stack,
+    operand_stack: ValStack,
     call_stack: Vec<(*const Function<Built>, Option<CodePointIdx>)>,
     exec: Arc<ExecutorStatics<A>>,
 }
 
 unsafe impl<A: ProgramAlloc> Send for Routine<A> {}
-
-impl<A: ProgramAlloc> Routine<A> {
-    fn exec(&self) -> &ExecutorStatics<A> {
-        &*self.exec
-    }
-}
 
 #[derive(Debug)]
 enum RoutineRunnerYieldReason {
@@ -301,7 +306,23 @@ fn run_routine<A: ProgramAlloc>(
             return_finished!();
         };
 
+        let ctx = &routine.exec.customs;
+
         match curr_code_point {
+            CodePoint::Add(ty) => {
+                let b = routine
+                    .operand_stack
+                    .pop_ret(ctx)
+                    .expect("Failed `Add`: Operand stack empty");
+                let a = routine
+                    .operand_stack
+                    .pop_ret(ctx)
+                    .expect("Failed `Add`: Operand stack empty");
+
+                assert!(a.ty() == b.ty(), "Failed `Add`: Type mismatch");
+                assert!(a.ty() == *ty, "Failed `Add`: Type mismatch");
+            }
+            CodePoint::Literal(lit) => routine.operand_stack.push_literal(lit.clone(), ctx),
             _ => todo!(),
         }
 

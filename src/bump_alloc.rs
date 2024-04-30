@@ -28,8 +28,8 @@ pub enum BumpErr {
 }
 
 impl Bump {
-    const MAX_CAPACITY: usize = 10 * TEBIBYTE;
-    const DEFAULT_CAPACITY: usize = 8 * MEBIBYTE;
+    pub const MAX_CAPACITY: usize = 10 * TEBIBYTE;
+    pub const DEFAULT_CAPACITY: usize = 8 * MEBIBYTE;
     pub fn new_default() -> Self {
         Self::new(Some((ptr_ops::MEBIBYTE * 2).try_into().unwrap()))
     }
@@ -128,6 +128,8 @@ impl Bump {
         })?;
         let (ptr, _) = ptr_ops::align_ptr_up(alloc_head.as_ptr() as usize, layout.align());
 
+        assert!(ptr_ops::is_aligned(ptr as usize, layout.align()));
+
         let ptr = NonNull::new(ptr.cast_mut()).unwrap();
         let ptr_end = ptr.as_ptr() as usize + layout.size();
 
@@ -147,12 +149,17 @@ impl Bump {
     ///
     /// Panics if `new_head` is not one of this stack's allocated bytes
     #[inline(always)]
-    pub fn deallocate_to(&mut self, new_head: NonNull<()>) {
+    pub fn dealloc_to(&mut self, new_head: NonNull<()>) {
         if !self.within_allocated_ptr(new_head) {
             panic!("Called `deallocate_to` on {new_head:p}")
         }
         let new_len = new_head.as_ptr() as usize - self.base.as_ptr() as usize;
         self.len = new_len;
+    }
+    /// Deallocates so that there are `offset` bytes allocated
+    #[inline(always)]
+    pub fn dealloc_to_offset(&mut self, offset: usize) {
+        self.dealloc_to(self.ptr_from_base(offset).unwrap())
     }
 }
 

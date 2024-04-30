@@ -6,8 +6,8 @@ use crate::{
 };
 
 pub trait BuildStatus: Sized + Copy + Debug + 'static {
-    type FunctionId: Debug + Clone;
-    type CustomTyId: Debug + Clone;
+    type FunctionId: Debug + Clone + Eq;
+    type CustomTyId: Debug + Clone + Eq;
 
     type CustomTyLayout;
 }

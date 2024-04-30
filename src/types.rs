@@ -1,4 +1,4 @@
-use crate::build_status::FinishBuildingCtx;
+use crate::{build_status::FinishBuildingCtx, ptr_ops::AlignedBytes};
 use std::{
     alloc::Layout, collections::HashMap, marker::PhantomData, num::NonZeroUsize, ptr::NonNull,
 };
@@ -6,10 +6,8 @@ use std::{
 use crate::{
     build_status::{BuildStatus, Building, Built},
     bump_alloc::Bump,
-    executor::ProgramAlloc,
-    gc::ProgramGC,
     global_debug, println_ctx,
-    ptr_ops::{self, DEFAULT_STACK_CAP, GIBIBYTE, TEBIBYTE},
+    ptr_ops::{self},
 };
 
 use self::primitives::{NumTy, PrimTy};
@@ -101,6 +99,15 @@ pub struct CustomType<B: BuildStatus> {
     pub(crate) fields: B::CustomTyLayout,
 }
 
+impl CustomType<Building> {
+    pub fn new(name: impl AsRef<str>, fields: Vec<Type<Building>>) -> Self {
+        Self {
+            id: name.into(),
+            fields,
+        }
+    }
+}
+
 /// Information about the custom types that currently exist
 #[derive(Debug)]
 pub struct TypeCtx {
@@ -115,7 +122,7 @@ impl TypeCtx {
     }
     pub fn build(
         ctx: &FinishBuildingCtx,
-        type_data: HashMap<CustomTyName, CustomType<Building>>,
+        type_data: impl IntoIterator<Item = (CustomTyName, CustomType<Building>)>,
     ) -> Self {
         #[derive(Debug)]
         struct CustomUnfinished {
@@ -250,12 +257,34 @@ impl Type<Building> {
     }
 }
 
+impl<B: BuildStatus> Eq for Type<B> {}
+
+impl<B: BuildStatus, R> PartialEq<R> for Type<B>
+where
+    R: Clone + Into<Type<B>>,
+{
+    #[inline(always)]
+    fn eq(&self, other: &R) -> bool {
+        let other = &other.clone().into();
+        match (self, other) {
+            (Self::Custom(l0), Self::Custom(r0)) => l0 == r0,
+            (Self::Primitive(l0), Self::Primitive(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
+}
+
 impl<B: BuildStatus> From<PrimTy<B>> for Type<B> {
     fn from(value: PrimTy<B>) -> Self {
         Self::Primitive(value)
     }
 }
 
+impl<B: BuildStatus> From<NumTy> for Type<B> {
+    fn from(value: NumTy) -> Self {
+        Self::Primitive(PrimTy::Num(value))
+    }
+}
 impl From<CustomTyName> for Type<Building> {
     fn from(value: CustomTyName) -> Self {
         Self::Custom(value)
@@ -302,19 +331,59 @@ impl TypeVal {
     // pub fn write(&mut self, new_val: Type)
 }
 
+pub trait IntoLiteral {
+    fn into_literal(self) -> OwnedValue<Building>;
+}
+
+impl IntoLiteral for f32 {
+    fn into_literal(self) -> OwnedValue<Building> {
+        let b = f32::to_ne_bytes(self);
+        unsafe { OwnedValue::new_raw(NumTy::F32.into(), &b, std::mem::align_of::<Self>()) }
+    }
+}
+
+impl IntoLiteral for f64 {
+    fn into_literal(self) -> OwnedValue<Building> {
+        let b = f64::to_ne_bytes(self);
+        unsafe { OwnedValue::new_raw(NumTy::F64.into(), &b, std::mem::align_of::<Self>()) }
+    }
+}
+
+impl IntoLiteral for i32 {
+    fn into_literal(self) -> OwnedValue<Building> {
+        let b = i32::to_ne_bytes(self);
+        unsafe { OwnedValue::new_raw(NumTy::I32.into(), &b, std::mem::align_of::<Self>()) }
+    }
+}
+
+impl IntoLiteral for u32 {
+    fn into_literal(self) -> OwnedValue<Building> {
+        let b = u32::to_ne_bytes(self);
+        unsafe { OwnedValue::new_raw(NumTy::U32.into(), &b, std::mem::align_of::<Self>()) }
+    }
+}
+
 /// A free-standing owned allocation of a given type
 ///
 /// An instance of `OwnedValue` is assumed to be a valid instance of its `Type`
 #[derive(Debug, Clone)]
 pub struct OwnedValue<B: BuildStatus> {
     ty: Type<B>,
-    raw: Box<[u8]>,
+    raw: AlignedBytes,
 }
 
 impl<B: BuildStatus> OwnedValue<B> {
-    /// Does not check to make sure this type is valid
-    pub unsafe fn new_raw(ty: Type<B>, bytes: Box<[u8]>) -> Self {
-        Self { ty, raw: bytes }
+    pub fn ty(&self) -> Type<B> {
+        self.ty.clone()
+    }
+    /// Does not check to make sure this type is valid,
+    /// and `align` must be a power of 2 that is at least as large as the alignment of `ty`
+    ///
+    /// Clones `bytes` into a new buffer
+    pub unsafe fn new_raw(ty: Type<B>, bytes: &[u8], align: usize) -> Self {
+        let mut raw = AlignedBytes::alloc(bytes.len(), align);
+        raw.clone_from_slice(bytes);
+        Self { ty, raw }
     }
     pub unsafe fn as_ptr<T>(&self) -> *const T {
         self.raw.as_ptr() as *const T
@@ -330,6 +399,9 @@ impl<B: BuildStatus> OwnedValue<B> {
 }
 
 impl OwnedValue<Building> {
+    pub fn new<T: IntoLiteral>(val: T) -> Self {
+        val.into_literal()
+    }
     pub(crate) fn finish(self, ctx: &FinishBuildingCtx) -> OwnedValue<Built> {
         OwnedValue {
             ty: self.ty.finish(ctx),
@@ -337,6 +409,10 @@ impl OwnedValue<Building> {
         }
     }
 }
+
+// impl OwnedValue<Built> {
+//     pub(crate) fn try_add()
+// }
 
 /// Ownership over an allocated stack value. This cannot be `Clone`d since the handle must be returned to the stack in order to deallocate
 ///
@@ -348,12 +424,12 @@ impl OwnedValue<Building> {
 /// (this will not cause UB until the underlying data is accessed)
 /// * ZSTs will be represented by a dangling pointer
 #[derive(Debug)]
-pub struct ValStackHandle {
+pub struct ValStackEntry {
     ty: Type<Built>,
     data_addr: NonNull<u8>,
 }
 
-impl ValStackHandle {
+impl ValStackEntry {
     /// Interprets the underlying data as a reference of the given type.
     /// This is useful since it enforces lifetime and mutability rules
     ///
@@ -416,16 +492,30 @@ impl ValStackHandle {
 /// A struct for allocating single stack values
 pub(crate) struct ValStack {
     alloc: Bump,
+    allocated: Vec<ValStackEntry>,
+}
+
+impl std::fmt::Debug for ValStack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValStack")
+            .field("allocated_bytes", &self.alloc.allocated_bytes())
+            .field("capacity", &self.alloc.capacity())
+            .field("allocated", &self.allocated)
+            .finish()
+    }
 }
 
 impl ValStack {
     /// Creates a new `ValStack` with 10MB of capacity
     pub fn new_default() -> Self {
-        Self::new(Some(DEFAULT_STACK_CAP.try_into().unwrap()))
+        Self::new(Some(Bump::DEFAULT_CAPACITY.try_into().unwrap()))
     }
     pub fn new(max_capacity: Option<NonZeroUsize>) -> Self {
         let alloc = Bump::new(max_capacity);
-        Self { alloc }
+        Self {
+            alloc,
+            allocated: vec![],
+        }
     }
     pub fn capacity(&self) -> usize {
         self.alloc.capacity()
@@ -433,9 +523,16 @@ impl ValStack {
     pub fn allocated_bytes(&self) -> usize {
         self.alloc.allocated_bytes()
     }
+    /// The current number of allocations
+    pub fn len(&self) -> usize {
+        self.allocated.len()
+    }
+    pub fn push_literal(&mut self, lit: OwnedValue<Built>, ctx: &TypeCtx) {
+        self.alloc_ty(lit.ty, ctx)
+    }
     /// Allocating a ZST will result in a dangling allocation, which is expected
     #[inline(always)]
-    pub fn alloc_ty(&mut self, ty: impl Into<Type<Built>>, ctx: &TypeCtx) -> ValStackHandle {
+    pub fn alloc_ty(&mut self, ty: impl Into<Type<Built>>, ctx: &TypeCtx) {
         let ty = ty.into();
         // SAFETY: `ty.layout()` guarantees correctness
         unsafe { self.alloc_layout(ty.layout(ctx), ty) }
@@ -445,12 +542,91 @@ impl ValStack {
     /// SAFETY:
     /// * `layout` must represent the correct layout for the type
     #[inline(always)]
-    pub unsafe fn alloc_layout(&mut self, layout: Layout, ty: Type<Built>) -> ValStackHandle {
+    pub unsafe fn alloc_layout(&mut self, layout: Layout, ty: Type<Built>) {
         let data = self.alloc.alloc_layout(layout).unwrap();
-        ValStackHandle {
+        let entry = ValStackEntry {
             ty,
             data_addr: data.cast(),
+        };
+        println_ctx!("\n{entry:?}");
+        self.allocated.push(entry);
+    }
+    /// Gets all the specified allocations, indexed from the top.
+    /// Checks for uniqueness of each `idx` element using a basic `O(n^2)` algorithm, which should
+    /// be fast enough for small numbers of elements and may be optimized away for a statically known `idx`
+    #[inline(always)]
+    pub fn peekn<'a>(&'a mut self, idx: &[usize]) -> Vec<&'a mut ValStackEntry> {
+        for i in 1..idx.len() {
+            if idx[i..].contains(&idx[i - 1]) {
+                panic!("Called `peekn` with duplicate indices:\n{idx:?}");
+            }
         }
+        for i in idx {
+            if *i >= self.allocated.len() {
+                panic!(
+                    "Called `peekn` with an index beyond the number of allocations `{}`:\n{idx:?}",
+                    self.allocated.len()
+                )
+            }
+        }
+        // SAFETY: We just checked for uniqueness of `idx`
+        unsafe { self.peekn_unckecked(idx) }
+    }
+    /// Gets all the specified allocations, indexed from the top
+    ///
+    /// SAFETY:
+    /// * `idx` must not contain any duplicates
+    /// * Every element in `idx` must be within the number of allocations
+    pub unsafe fn peekn_unckecked(&mut self, idx: &[usize]) -> Vec<&mut ValStackEntry> {
+        self.allocated
+            .iter_mut()
+            .rev()
+            .enumerate()
+            .filter(|(this_idx, _)| idx.contains(this_idx))
+            .take(idx.len()) // Only take a certain number, which will be a great shortcut
+            .map(|(_, elem)| elem)
+            .collect::<Vec<_>>()
+    }
+
+    pub fn peek<'a>(&'a mut self, idx: usize) -> &'a mut ValStackEntry {
+        self.peekn(&[idx]).pop().unwrap()
+    }
+    pub fn pop_count(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        if count >= self.allocated.len() {
+            panic!(
+                "Called `pop_count({count})` with `{}` allocations left",
+                self.allocated.len()
+            );
+        }
+        for _ in 0..count - 1 {
+            let _ = self.allocated.pop().unwrap();
+        }
+        let new_head = self.allocated.pop().unwrap().data_addr;
+        self.alloc.dealloc_to(new_head.cast());
+    }
+    pub fn pop(&mut self) {
+        self.pop_count(1);
+    }
+    pub fn pop_ret(&mut self, ctx: &TypeCtx) -> Option<OwnedValue<Built>> {
+        if self.len() == 0 {
+            return None;
+        }
+        let top = self.peek(0);
+        // SAFETY: The source allocation and type are known to be valid
+        let ret = unsafe {
+            OwnedValue::new_raw(
+                top.ty.clone(),
+                top.as_bytes(ctx),
+                top.ty.layout(ctx).align(),
+            )
+        };
+
+        self.pop_count(1);
+
+        Some(ret)
     }
 }
 
@@ -484,7 +660,7 @@ fn test_val_stack_allocation() {
         let start_bytes = v.allocated_bytes();
 
         let layout = Layout::new::<T>();
-        let val = unsafe { v.alloc_layout(layout, PrimTy::Void.into()) };
+        unsafe { v.alloc_layout(layout, PrimTy::Void.into()) };
 
         let delta_bytes = v.allocated_bytes() - start_bytes;
         assert!(
@@ -493,6 +669,7 @@ fn test_val_stack_allocation() {
             layout.size()
         );
 
+        let val = v.peek(0);
         let p_addr = val.data_addr.as_ptr() as usize;
 
         assert!(ptr_ops::is_aligned(p_addr, layout.align()));
@@ -508,39 +685,32 @@ fn test_val_stack_allocation() {
 fn test_val_stack_alloc_dealloc() {
     let ctx = TypeCtx::empty();
     let mut v = ValStack::new_default();
-    let mut bottom = v.alloc_ty(PrimTy::Num(NumTy::U32), &ctx);
+    v.alloc_ty(PrimTy::Num(NumTy::U32), &ctx);
+    let bottom = v.peek(0);
     *unsafe { bottom.as_mut::<u32>() } = 10;
-    let mut handles = vec![];
 
-    for i in 0..100 {
+    for i in 0..12 {
         for h in 0..=i {
-            let mut handle = v.alloc_ty(PrimTy::Num(NumTy::F64), &ctx);
-            // SAFETY: This handle is a primitive `f64`
-            let f = unsafe { handle.as_mut::<f64>() };
+            v.alloc_ty(PrimTy::Num(NumTy::F64), &ctx);
+            let entry = v.peek(0);
+            // SAFETY: This entry is a primitive `f64`
+            let f = unsafe { entry.as_mut::<f64>() };
             *f = h as f64;
-
-            handles.push(handle);
         }
-        for h in 0..=i {
-            let seek = (i - h) as f64;
-            let h = handles.pop().unwrap();
-            println_ctx!("{i}");
-            // let top = v.pop_primitive_ret(h);
-            // let copied: f64 = unsafe { *top.as_ref() };
-            // assert_eq!(copied, seek);
+        for h in (0..=i).rev() {
+            let entry = v.pop_ret(&ctx).unwrap();
+            // SAFETY: This entry is a primitive `f64`
+            let f = unsafe { entry.as_ref::<f64>() };
+            println_ctx!("{i},{h}={f}",);
         }
-        assert!(handles.is_empty())
+        assert!(v.len() == 1);
     }
 
     println_ctx!();
-
-    // let bot = v.pop_primitive_ret(bottom);
-    // let copied: u32 = unsafe { *bot.as_ref() };
-    // assert_eq!(copied, 10);
 }
 
 pub mod primitives {
-    use std::{alloc::Layout, rc::Rc};
+    use std::{alloc::Layout, rc::Rc, sync::Arc};
 
     use crate::build_status::{BuildStatus, Building, Built, FinishBuildingCtx};
 
@@ -571,8 +741,20 @@ pub mod primitives {
     #[derive(Debug, Clone)]
     pub enum PrimTy<B: BuildStatus> {
         Void,
-        GcPtr(Box<Type<B>>),
+        GcPtr(Arc<Type<B>>),
         Num(NumTy),
+    }
+
+    impl<B: BuildStatus> Eq for PrimTy<B> {}
+
+    impl<B: BuildStatus> PartialEq for PrimTy<B> {
+        fn eq(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Self::GcPtr(l0), Self::GcPtr(r0)) => l0 == r0,
+                (Self::Num(l0), Self::Num(r0)) => l0 == r0,
+                _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+            }
+        }
     }
 
     impl<B: BuildStatus> PrimTy<B> {
@@ -598,7 +780,10 @@ pub mod primitives {
             match self {
                 PrimTy::Void => PrimTy::Void,
                 PrimTy::Num(t) => PrimTy::Num(t),
-                PrimTy::GcPtr(t) => PrimTy::GcPtr(Box::new(t.finish(ctx))),
+                PrimTy::GcPtr(t) => {
+                    let t = Arc::unwrap_or_clone(t);
+                    PrimTy::GcPtr(Arc::new(t.finish(ctx)))
+                }
             }
         }
     }
